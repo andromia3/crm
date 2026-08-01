@@ -28,6 +28,14 @@ fallback("GOOGLE_CLIENT_SECRET", "test-google-client-secret");
 describe("Auth (e2e)", () => {
 	let app: INestApplication;
 
+	// Booting the whole application is not a five-second operation, and five
+	// seconds is what `bun test` allows a hook by default. Compiling `AppModule`
+	// stands up Prisma, Better Auth and the tRPC router factory — nine routers
+	// and thirty-nine procedures — and on a cold cache that lands either side of
+	// the limit: this file failed two runs in five, always here, reported as
+	// `(unnamed)` with a hook timeout because the hook is not a test and has no
+	// name to print. The suite that passed took seven seconds to do the same
+	// work, so the boot was never wrong, only unbudgeted.
 	beforeAll(async () => {
 		const { AppModule } = await import("../src/app.module");
 
@@ -37,7 +45,7 @@ describe("Auth (e2e)", () => {
 
 		app = moduleFixture.createNestApplication({ bodyParser: false });
 		await app.init();
-	});
+	}, 60_000);
 
 	afterAll(async () => {
 		await app.close();
