@@ -588,7 +588,13 @@ async function seedActivities(
 		companyId,
 		contactId: null,
 		dealId: null,
-		occurredAt: null,
+		// Every entry sits somewhere on the timeline, which orders by `occurredAt`
+		// with nulls last. Leaving it unset does not put an entry at the end of
+		// its day, it puts it after the entire dated history — so a note written
+		// in July rendered its own "Mon, 27 Jul" heading *below* February.
+		// `ActivitiesService.create` stamps this for every type for the same
+		// reason; the seed is only reproducing what the app already guarantees.
+		occurredAt: createdAt,
 		dueAt: null,
 		completedAt: null,
 		subject: null,
@@ -626,7 +632,7 @@ async function seedActivities(
 								? pick(EMAIL_SUBJECTS)
 								: null,
 				body: type === ActivityType.NOTE ? pick(NOTE_BODIES) : null,
-				occurredAt: type === ActivityType.NOTE ? null : at,
+				occurredAt: at,
 			});
 		}
 
@@ -681,12 +687,54 @@ async function seedActivities(
 	return rows.length;
 }
 
+/**
+ * The bookkeeping `createMany` skips.
+ *
+ * `lastActivityAt` is denormalised onto company, contact and deal so the lists
+ * can sort on an indexed column instead of a subquery per row. Every path that
+ * writes an activity in the running app pays for that by touching the parents
+ * too — `ActivitiesService.create`, both Google syncs, the stage change in
+ * `DealsService`. `createMany` issues one INSERT and calls nothing, so the seed
+ * produced 162 activities and left all 83 records reading "never touched": the
+ * Last activity column was "—" on every row of every list, and sorting by it
+ * did nothing, since nulls sort last in both directions.
+ *
+ * `COALESCE(occurredAt, createdAt)` rather than plain `occurredAt`: the seed now
+ * stamps both, but a database seeded by an older revision still holds rows with
+ * a backdated `createdAt` and no `occurredAt`, and for those the write time is
+ * the only record of when it happened.
+ *
+ * Runs unconditionally rather than only after a fresh insert, so re-seeding an
+ * existing database repairs one seeded before this existed.
+ */
+async function stampLastActivity(): Promise<void> {
+	for (const [table, column] of [
+		["company", "companyId"],
+		["contact", "contactId"],
+		["deal", "dealId"],
+	] as const) {
+		await db.$executeRawUnsafe(`
+			UPDATE "${table}" AS target
+			SET "lastActivityAt" = latest.at
+			FROM (
+				SELECT "${column}" AS id, MAX(COALESCE("occurredAt", "createdAt")) AS at
+				FROM "activity"
+				WHERE "${column}" IS NOT NULL
+				GROUP BY "${column}"
+			) AS latest
+			WHERE target.id = latest.id
+			  AND target."lastActivityAt" IS DISTINCT FROM latest.at
+		`);
+	}
+}
+
 async function main() {
 	const ownerIds = await seedOwners();
 	const companies = await seedCompanies(ownerIds);
 	const contacts = await seedContacts(companies, ownerIds);
 	const deals = await seedDeals(companies, contacts, ownerIds);
 	const activities = await seedActivities(companies, contacts, deals, ownerIds);
+	await stampLastActivity();
 
 	console.log(
 		`Seeded ${companies.length} companies, ${contacts.length} contacts, ` +
