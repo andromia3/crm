@@ -681,12 +681,53 @@ async function seedActivities(
 	return rows.length;
 }
 
+/**
+ * The bookkeeping `createMany` skips.
+ *
+ * `lastActivityAt` is denormalised onto company, contact and deal so the lists
+ * can sort on an indexed column instead of a subquery per row. Every path that
+ * writes an activity in the running app pays for that by touching the parents
+ * too — `ActivitiesService.create`, both Google syncs, the stage change in
+ * `DealsService`. `createMany` issues one INSERT and calls nothing, so the seed
+ * produced 162 activities and left all 83 records reading "never touched": the
+ * Last activity column was "—" on every row of every list, and sorting by it
+ * did nothing, since nulls sort last in both directions.
+ *
+ * `COALESCE(occurredAt, createdAt)` because notes, tasks and stage changes are
+ * seeded with a backdated `createdAt` and no `occurredAt` — for those, when the
+ * row was written is the only record of when it happened.
+ *
+ * Runs unconditionally rather than only after a fresh insert, so re-seeding an
+ * existing database repairs one seeded before this existed.
+ */
+async function stampLastActivity(): Promise<void> {
+	for (const [table, column] of [
+		["company", "companyId"],
+		["contact", "contactId"],
+		["deal", "dealId"],
+	] as const) {
+		await db.$executeRawUnsafe(`
+			UPDATE "${table}" AS target
+			SET "lastActivityAt" = latest.at
+			FROM (
+				SELECT "${column}" AS id, MAX(COALESCE("occurredAt", "createdAt")) AS at
+				FROM "activity"
+				WHERE "${column}" IS NOT NULL
+				GROUP BY "${column}"
+			) AS latest
+			WHERE target.id = latest.id
+			  AND target."lastActivityAt" IS DISTINCT FROM latest.at
+		`);
+	}
+}
+
 async function main() {
 	const ownerIds = await seedOwners();
 	const companies = await seedCompanies(ownerIds);
 	const contacts = await seedContacts(companies, ownerIds);
 	const deals = await seedDeals(companies, contacts, ownerIds);
 	const activities = await seedActivities(companies, contacts, deals, ownerIds);
+	await stampLastActivity();
 
 	console.log(
 		`Seeded ${companies.length} companies, ${contacts.length} contacts, ` +
