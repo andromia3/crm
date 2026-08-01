@@ -588,7 +588,13 @@ async function seedActivities(
 		companyId,
 		contactId: null,
 		dealId: null,
-		occurredAt: null,
+		// Every entry sits somewhere on the timeline, which orders by `occurredAt`
+		// with nulls last. Leaving it unset does not put an entry at the end of
+		// its day, it puts it after the entire dated history — so a note written
+		// in July rendered its own "Mon, 27 Jul" heading *below* February.
+		// `ActivitiesService.create` stamps this for every type for the same
+		// reason; the seed is only reproducing what the app already guarantees.
+		occurredAt: createdAt,
 		dueAt: null,
 		completedAt: null,
 		subject: null,
@@ -626,7 +632,7 @@ async function seedActivities(
 								? pick(EMAIL_SUBJECTS)
 								: null,
 				body: type === ActivityType.NOTE ? pick(NOTE_BODIES) : null,
-				occurredAt: type === ActivityType.NOTE ? null : at,
+				occurredAt: at,
 			});
 		}
 
@@ -693,9 +699,10 @@ async function seedActivities(
  * Last activity column was "—" on every row of every list, and sorting by it
  * did nothing, since nulls sort last in both directions.
  *
- * `COALESCE(occurredAt, createdAt)` because notes, tasks and stage changes are
- * seeded with a backdated `createdAt` and no `occurredAt` — for those, when the
- * row was written is the only record of when it happened.
+ * `COALESCE(occurredAt, createdAt)` rather than plain `occurredAt`: the seed now
+ * stamps both, but a database seeded by an older revision still holds rows with
+ * a backdated `createdAt` and no `occurredAt`, and for those the write time is
+ * the only record of when it happened.
  *
  * Runs unconditionally rather than only after a fresh insert, so re-seeding an
  * existing database repairs one seeded before this existed.
