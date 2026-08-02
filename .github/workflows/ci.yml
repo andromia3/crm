@@ -1,0 +1,83 @@
+# The three commands CONTRIBUTING.md says run on CI.
+#
+# `build` is deliberately not among them. The tRPC generator ships a native
+# binary needing a newer GLIBC than most build images have, which is why
+# `src/generated/server.ts` is committed and `build` must never regenerate it —
+# see docs/api.md. `check-types` runs the generator, so a router change that was
+# not regenerated locally still fails here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check-types, lint, test
+    runs-on: ubuntu-latest
+
+    # The api and agent suites run against a real Postgres on purpose: "never
+    # overwrite a human" is only true if the transaction says so (docs/agent.md).
+    # Matches the docker-compose service so a failure here reproduces locally.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: crm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d crm"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Job-level rather than per-step because the very first command needs them:
+    # `bun install` runs @crm/db's postinstall, which is `prisma generate`, and
+    # Prisma resolves DATABASE_URL while loading prisma.config.ts. Without it the
+    # install fails before a single test has run.
+    #
+    # The five required values from .env.example. Nothing here is a secret: no
+    # OAuth flow is exercised, and env.validation.ts only asks that the Google
+    # pair be non-empty because Google is the only sign-in method. The auth
+    # secret just has to clear its 32-character minimum.
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/crm?schema=public
+      BETTER_AUTH_SECRET: ci-only-secret-at-least-32-characters-long
+      ALLOWED_SIGN_IN: example.com
+      GOOGLE_CLIENT_ID: ci-google-client-id
+      GOOGLE_CLIENT_SECRET: ci-google-client-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The version devEngines declares, so CI and a contributor's machine
+          # resolve the same tree.
+          bun-version: 1.3.12
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Migrations, not `db:push`: this is the schema a deploy would get, and the
+      # integration specs need the tables to exist.
+      - name: Apply migrations
+        run: bun run db:deploy
+
+      - name: Check types
+        run: bun run check-types
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
